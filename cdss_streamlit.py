@@ -272,12 +272,25 @@ def _ocr_image_bytes(raw: bytes, filename: str) -> str:
     }.get(ext, "image/png")
 
     # --- Try Groq vision first (no extra install needed) ---
-    llm = st.session_state.get("llm")
-    if llm:
+    llm   = st.session_state.get("llm")
+    model = st.session_state.get("MODEL", "")
+
+    # Pick a vision-capable model: prefer scout, fall back to the session model
+    VISION_PREFERENCE = [
+        "meta-llama/llama-4-scout-17b-16e-instruct",
+        "meta-llama/llama-4-maverick-17b-128e-instruct",
+        "llama-3.2-90b-vision-preview",
+        "llama-3.2-11b-vision-preview",
+    ]
+    available = set(st.session_state.get("available_models", []))
+    vision_model = next((m for m in VISION_PREFERENCE if m in available), None)
+
+    vision_error = ""
+    if llm and vision_model:
         try:
             b64  = base64.b64encode(raw).decode()
             resp = llm.chat.completions.create(
-                model="meta-llama/llama-4-scout-17b-16e-instruct",
+                model=vision_model,
                 max_tokens=2048,
                 messages=[{
                     "role": "user",
@@ -300,22 +313,33 @@ def _ocr_image_bytes(raw: bytes, filename: str) -> str:
             text = resp.choices[0].message.content.strip()
             if text:
                 return text
-        except Exception:
-            pass  # Fall through to pytesseract
+        except Exception as e:
+            vision_error = str(e)
+    elif not vision_model:
+        vision_error = "No vision-capable model found in your Groq account."
 
     # --- Fallback: pytesseract (local OCR) ---
     try:
         import pytesseract
         from PIL import Image
         img  = Image.open(io.BytesIO(raw))
-        return pytesseract.image_to_string(img)
+        result = pytesseract.image_to_string(img).strip()
+        if result:
+            return result
+        raise ValueError("pytesseract returned empty text")
     except ImportError:
-        return (
-            f"[Image OCR unavailable for {filename}. "
-            "Install pytesseract + Tesseract, or ensure the Groq vision model is accessible.]"
-        )
+        pass
     except Exception as e:
-        return f"[Image OCR failed for {filename}: {e}]"
+        vision_error += f" | pytesseract: {e}"
+
+    # Both failed — surface a clear error so the user knows
+    msg = (
+        f"IMAGE OCR FAILED for '{filename}'. "
+        f"Reason: {vision_error or 'unknown error'}. "
+        "Please paste the text content manually in the free text box instead."
+    )
+    st.error(msg)
+    return ""
 
 
 def extract_text_from_upload(uploaded_file) -> str:
